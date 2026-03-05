@@ -62,7 +62,7 @@ ATTENDANCE_DB=/data/attendance.db
 - Open `http://<unraid-ip>:8080` (or your `HOST_PORT`).
 
 ### 4) Use
-- Open **Manage Departments** to add departments (with manager name).
+- Open **Manage Departments** to add departments (with manager name) or remove departments.
 - Add employees and select department from the dropdown.
 - Choose **Month View** or **Pay Period View**.
 - Use the department dropdown to filter the board.

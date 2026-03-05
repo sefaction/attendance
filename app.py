@@ -127,8 +127,16 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
         departments = conn.execute("SELECT id, name, manager_name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
 
     rows = "".join(
-        f"<tr><td>{html.escape(r['name'])}</td><td>{html.escape(r['manager_name'] or '—')}</td></tr>" for r in departments
-    ) or "<tr><td colspan='2'>No departments yet.</td></tr>"
+        "<tr>"
+        f"<td>{html.escape(r['name'])}</td>"
+        f"<td>{html.escape(r['manager_name'] or '—')}</td>"
+        "<td><details class='menu'><summary title='Actions'>⋯</summary><div class='menu-panel'>"
+        "<form method='post' action='/departments/delete'>"
+        f"{hidden_inputs(state)}<input type='hidden' name='department_id' value='{r['id']}'/>"
+        "<button class='danger' type='submit'>Remove Department</button></form></div></details></td>"
+        "</tr>"
+        for r in departments
+    ) or "<tr><td colspan='3'>No departments yet.</td></tr>"
 
     page = f"""<!doctype html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
@@ -145,7 +153,7 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
 </section>
 <section class='card'>
 <div class='table-wrap'>
-<table><thead><tr><th>Department</th><th>Manager</th></tr></thead><tbody>{rows}</tbody></table>
+<table><thead><tr><th>Department</th><th>Manager</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table>
 </div>
 </section>
 </main></body></html>"""
@@ -376,6 +384,16 @@ def application(environ, start_response):
                     (name, manager_name),
                 )
                 conn.commit()
+        return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
+
+
+    if method == "POST" and path == "/departments/delete":
+        form = read_post(environ)
+        department_id = int((form.get("department_id") or ["0"])[0])
+        with closing(get_conn()) as conn:
+            conn.execute("UPDATE users SET department_id = NULL WHERE department_id = ?", (department_id,))
+            conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
+            conn.commit()
         return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
 
     if method == "POST" and path == "/users":
