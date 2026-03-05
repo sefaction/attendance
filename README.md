@@ -4,9 +4,11 @@ Simple shared attendance board for salaried employees.
 
 ## Features
 - Add and remove users.
+- Assign each user to an optional department.
+- Filter the board by department.
 - Click a day cell to toggle an `X` for attendance.
 - Shared view for everyone on your network.
-- Monthly navigation.
+- View by **month** or by **pay period** (Sunday-Saturday).
 - SQLite persistence via `/data` volume.
 
 ---
@@ -57,7 +59,9 @@ ATTENDANCE_DB=/data/attendance.db
 - Open `http://<unraid-ip>:8080` (or your `HOST_PORT`).
 
 ### 4) Use
-- Add employees in the top form.
+- Add employees with optional department values.
+- Choose **Month View** or **Pay Period View**.
+- Use the department dropdown to filter the board.
 - Click a date cell to add/remove an `X`.
 - Click **Remove** to delete a user and their attendance history.
 

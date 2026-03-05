@@ -23,14 +23,25 @@ h1 {
   margin-bottom: 1rem;
 }
 
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  justify-content: space-between;
+  align-items: center;
+}
+
 .inline-form {
   display: flex;
   gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
-input[type='text'] {
+input[type='text'],
+select {
   padding: 0.45rem;
-  min-width: 220px;
+  min-width: 200px;
 }
 
 button {
@@ -50,12 +61,37 @@ button.danger {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 0.5rem;
 }
 
 .month-nav a {
   text-decoration: none;
   color: #2f5ee0;
   font-weight: bold;
+}
+
+.view-links {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.pill {
+  text-decoration: none;
+  color: #2f5ee0;
+  border: 1px solid #2f5ee0;
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.9rem;
+}
+
+.pill.active {
+  background: #2f5ee0;
+  color: white;
+}
+
+.subtle {
+  color: #666;
+  font-size: 0.92rem;
 }
 
 .table-wrap {
@@ -89,7 +125,8 @@ td:last-child {
 th:first-child,
 td:first-child {
   left: 0;
-  min-width: 140px;
+  min-width: 180px;
+  text-align: left;
 }
 
 th:last-child,
