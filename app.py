@@ -105,6 +105,53 @@ def build_url(params: dict[str, str]) -> str:
     return "/" if not kept else "/?" + urlencode(kept)
 
 
+def state_from_query(query: dict[str, list[str]]) -> dict[str, str]:
+    return {
+        "mode": (query.get("mode") or [""])[0],
+        "month": (query.get("month") or [""])[0],
+        "start": (query.get("start") or [""])[0],
+        "department_id": (query.get("department_id") or [""])[0],
+    }
+
+
+def hidden_inputs(state: dict[str, str]) -> str:
+    return "".join(
+        f"<input type='hidden' name='{html.escape(k)}' value='{html.escape(v)}'/>" for k, v in state.items() if v
+    )
+
+
+def render_departments_page(query: dict[str, list[str]]) -> bytes:
+    state = state_from_query(query)
+    back_url = build_url(state)
+    with closing(get_conn()) as conn:
+        departments = conn.execute("SELECT id, name, manager_name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
+
+    rows = "".join(
+        f"<tr><td>{html.escape(r['name'])}</td><td>{html.escape(r['manager_name'] or '—')}</td></tr>" for r in departments
+    ) or "<tr><td colspan='2'>No departments yet.</td></tr>"
+
+    page = f"""<!doctype html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Departments - Attendance Tracker</title><link rel='stylesheet' href='/static/styles.css'></head>
+<body><main><h1>Departments</h1>
+<section class='card'>
+<form method='post' action='/departments' class='inline-form'>
+{hidden_inputs(state)}
+<input type='text' name='name' placeholder='Department name' required />
+<input type='text' name='manager_name' placeholder='Department manager name' />
+<button type='submit'>Add Department</button>
+<a class='pill active' href='{back_url}'>Back to Attendance</a>
+</form>
+</section>
+<section class='card'>
+<div class='table-wrap'>
+<table><thead><tr><th>Department</th><th>Manager</th></tr></thead><tbody>{rows}</tbody></table>
+</div>
+</section>
+</main></body></html>"""
+    return page.encode("utf-8")
+
+
 def render_index(query: dict[str, list[str]]) -> bytes:
     today = date.today()
     mode = (query.get("mode") or ["month"])[0]
@@ -171,24 +218,21 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 
     marks = {(r["user_id"], r["attended_on"]) for r in records}
     head_cells = "".join(f"<th>{d.day}<br><small>{d.strftime('%a')}</small></th>" for d in days)
-    return_hidden = "".join(
-        f"<input type='hidden' name='{html.escape(k)}' value='{html.escape(v)}'/>" for k, v in return_query.items() if v
-    )
+    return_hidden = hidden_inputs(return_query)
 
     dept_options = ["<option value=''>No department</option>"]
     filter_options = ["<option value=''>All departments</option>"]
     selected_label = "All departments"
-    dept_rows = []
+
     for dept in departments:
         did = str(dept["id"])
         name = html.escape(dept["name"])
         manager = html.escape(dept["manager_name"] or "—")
-        dept_options.append(f"<option value='{did}'>{name}</option>")
+        dept_options.append(f"<option value='{did}'>{name} (Mgr: {manager})</option>")
         selected = " selected" if did == selected_department_id else ""
         if selected:
-            selected_label = dept["name"]
+            selected_label = f"{dept['name']} (Mgr: {dept['manager_name'] or '—'})"
         filter_options.append(f"<option value='{did}'{selected}>{name}</option>")
-        dept_rows.append(f"<li><strong>{name}</strong> — Manager: {manager}</li>")
 
     mon_fri_days = days[1:6] if mode == "period" else []
 
@@ -209,10 +253,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
                 "</form></td>"
             )
 
-        is_incomplete_week = False
-        if mode == "period":
-            is_incomplete_week = any((user["id"], day.isoformat()) not in marks for day in mon_fri_days)
-
+        is_incomplete_week = mode == "period" and any((user["id"], day.isoformat()) not in marks for day in mon_fri_days)
         dept_label = html.escape(user["department_name"] or "—")
         mgr_label = html.escape(user["department_manager"] or "—")
         row_cls = " class='incomplete-week'" if is_incomplete_week else ""
@@ -233,35 +274,30 @@ def render_index(query: dict[str, list[str]]) -> bytes:
             + "".join(cells)
             + "<td class='actions-cell'>"
             + bulk_button
-            + "<form method='post' action='/users/delete'>"
-            f"{return_hidden}"
-            f"<input type='hidden' name='user_id' value='{user['id']}'/>"
-            "<button class='danger' type='submit'>Remove</button>"
-            "</form></td></tr>"
+            + "<details class='menu'><summary title='Actions'>⋯</summary>"
+            + "<div class='menu-panel'><form method='post' action='/users/delete'>"
+            + f"{return_hidden}<input type='hidden' name='user_id' value='{user['id']}'/>"
+            + "<button class='danger' type='submit'>Remove</button></form></div></details></td></tr>"
         )
 
     rows_html = "".join(body_rows) if body_rows else "<tr><td colspan='999'>No users for this filter.</td></tr>"
 
     mode_month_url = build_url({"mode": "month", "department_id": selected_department_id})
     mode_period_url = build_url({"mode": "period", "department_id": selected_department_id})
+    dept_page_url = "/departments" + ("?" + urlencode(return_query) if any(return_query.values()) else "")
 
     page = f"""<!doctype html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Attendance Tracker</title><link rel='stylesheet' href='/static/styles.css'></head>
 <body><main><h1>Attendance Tracker</h1>
-<section class='card'><h2>Departments</h2>
-<form method='post' action='/departments' class='inline-form'>
-{return_hidden}
-<input type='text' name='name' placeholder='Department name' required />
-<input type='text' name='manager_name' placeholder='Department manager name' />
-<button type='submit'>Add Department</button></form>
-<p class='subtle'>Current departments:</p><ul class='dept-list'>{''.join(dept_rows) or '<li>None yet.</li>'}</ul></section>
 <section class='card'><h2>Add Employee</h2>
 <form method='post' action='/users' class='inline-form'>
 {return_hidden}
 <input type='text' name='name' placeholder='Employee name' required />
 <select name='department_id'>{''.join(dept_options)}</select>
-<button type='submit'>Add User</button></form></section>
+<button type='submit'>Add User</button>
+<a class='pill' href='{dept_page_url}'>Manage Departments</a>
+</form></section>
 <section class='card controls'>
 <form method='get' class='inline-form'>
 <input type='hidden' name='mode' value='{mode}' />
@@ -324,6 +360,11 @@ def application(environ, start_response):
         start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
         return [data]
 
+    if method == "GET" and path == "/departments":
+        data = render_departments_page(query)
+        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
+        return [data]
+
     if method == "POST" and path == "/departments":
         form = read_post(environ)
         name = (form.get("name") or [""])[0].strip()
@@ -335,7 +376,7 @@ def application(environ, start_response):
                     (name, manager_name),
                 )
                 conn.commit()
-        return redirect_from_form(start_response, form)
+        return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
 
     if method == "POST" and path == "/users":
         form = read_post(environ)

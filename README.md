@@ -4,7 +4,7 @@ Simple shared attendance board for salaried employees.
 
 ## Features
 - Add and remove users.
-- Manage departments in a dedicated section (including department manager).
+- Manage departments on a separate **Departments** page (including department manager).
 - Assign users to departments via dropdown selection.
 - Filter the board by department.
 - Click a day cell to toggle an `X` for attendance.
@@ -62,14 +62,14 @@ ATTENDANCE_DB=/data/attendance.db
 - Open `http://<unraid-ip>:8080` (or your `HOST_PORT`).
 
 ### 4) Use
-- Add departments first in the **Departments** section (with manager name).
+- Open **Manage Departments** to add departments (with manager name).
 - Add employees and select department from the dropdown.
 - Choose **Month View** or **Pay Period View**.
 - Use the department dropdown to filter the board.
 - Click a date cell to add/remove an `X`.
 - In **Pay Period View**, use **Fill Mon–Fri** to check all weekdays for a user.
 - In **Pay Period View**, incomplete Mon–Fri users are highlighted red.
-- Click **Remove** to delete a user and their attendance history.
+- Open the 3-dot actions menu to access **Remove** for a user.
 
 ---
 
