@@ -53,6 +53,10 @@ button {
   color: #fff;
 }
 
+button.secondary {
+  background: #6b7280;
+}
+
 button.danger {
   background: #c62828;
 }
@@ -94,6 +98,11 @@ button.danger {
   font-size: 0.92rem;
 }
 
+.dept-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1rem;
+}
+
 .table-wrap {
   overflow-x: auto;
   border: 1px solid #ddd;
@@ -113,6 +122,10 @@ td {
   padding: 0.25rem;
 }
 
+tbody tr.incomplete-week {
+  background: #ffe3e3;
+}
+
 th:first-child,
 td:first-child,
 th:last-child,
@@ -122,16 +135,29 @@ td:last-child {
   z-index: 1;
 }
 
+tbody tr.incomplete-week td:first-child,
+tbody tr.incomplete-week td:last-child {
+  background: #ffd6d6;
+}
+
 th:first-child,
 td:first-child {
   left: 0;
-  min-width: 180px;
+  min-width: 220px;
   text-align: left;
 }
 
 th:last-child,
 td:last-child {
   right: 0;
+}
+
+.actions-cell {
+  min-width: 140px;
+}
+
+.actions-cell form {
+  margin-bottom: 0.3rem;
 }
 
 .mark {

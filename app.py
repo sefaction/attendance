@@ -28,7 +28,8 @@ def init_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS departments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE
+                name TEXT NOT NULL UNIQUE,
+                manager_name TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +53,10 @@ def init_db() -> None:
         if "department_id" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN department_id INTEGER")
 
-        # Migrate any legacy text departments into departments table.
+        dept_cols = [r[1] for r in conn.execute("PRAGMA table_info(departments)").fetchall()]
+        if "manager_name" not in dept_cols:
+            conn.execute("ALTER TABLE departments ADD COLUMN manager_name TEXT NOT NULL DEFAULT ''")
+
         legacy_departments = conn.execute(
             "SELECT DISTINCT trim(department) AS department FROM users WHERE trim(department) <> ''"
         ).fetchall()
@@ -141,7 +145,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
     end_iso = days[-1].isoformat()
 
     with closing(get_conn()) as conn:
-        departments = conn.execute("SELECT id, name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
+        departments = conn.execute("SELECT id, name, manager_name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
 
         where = ""
         params: list[str] = []
@@ -151,7 +155,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 
         users = conn.execute(
             f"""
-            SELECT u.id, u.name, d.name AS department_name
+            SELECT u.id, u.name, d.name AS department_name, d.manager_name AS department_manager
             FROM users u
             LEFT JOIN departments d ON d.id = u.department_id
             {where}
@@ -174,14 +178,19 @@ def render_index(query: dict[str, list[str]]) -> bytes:
     dept_options = ["<option value=''>No department</option>"]
     filter_options = ["<option value=''>All departments</option>"]
     selected_label = "All departments"
+    dept_rows = []
     for dept in departments:
         did = str(dept["id"])
         name = html.escape(dept["name"])
+        manager = html.escape(dept["manager_name"] or "—")
         dept_options.append(f"<option value='{did}'>{name}</option>")
         selected = " selected" if did == selected_department_id else ""
         if selected:
             selected_label = dept["name"]
         filter_options.append(f"<option value='{did}'{selected}>{name}</option>")
+        dept_rows.append(f"<li><strong>{name}</strong> — Manager: {manager}</li>")
+
+    mon_fri_days = days[1:6] if mode == "period" else []
 
     body_rows = []
     for user in users:
@@ -200,12 +209,31 @@ def render_index(query: dict[str, list[str]]) -> bytes:
                 "</form></td>"
             )
 
+        is_incomplete_week = False
+        if mode == "period":
+            is_incomplete_week = any((user["id"], day.isoformat()) not in marks for day in mon_fri_days)
+
         dept_label = html.escape(user["department_name"] or "—")
+        mgr_label = html.escape(user["department_manager"] or "—")
+        row_cls = " class='incomplete-week'" if is_incomplete_week else ""
+
+        bulk_button = ""
+        if mode == "period":
+            bulk_button = (
+                "<form method='post' action='/attendance/fill_weekdays'>"
+                f"{return_hidden}"
+                f"<input type='hidden' name='user_id' value='{user['id']}'/>"
+                "<button class='secondary' type='submit'>Fill Mon–Fri</button>"
+                "</form>"
+            )
+
         body_rows.append(
-            "<tr>"
-            f"<td><strong>{html.escape(user['name'])}</strong><br><small>{dept_label}</small></td>"
+            f"<tr{row_cls}>"
+            f"<td><strong>{html.escape(user['name'])}</strong><br><small>{dept_label}</small><br><small>Mgr: {mgr_label}</small></td>"
             + "".join(cells)
-            + "<td><form method='post' action='/users/delete'>"
+            + "<td class='actions-cell'>"
+            + bulk_button
+            + "<form method='post' action='/users/delete'>"
             f"{return_hidden}"
             f"<input type='hidden' name='user_id' value='{user['id']}'/>"
             "<button class='danger' type='submit'>Remove</button>"
@@ -224,8 +252,10 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 <section class='card'><h2>Departments</h2>
 <form method='post' action='/departments' class='inline-form'>
 {return_hidden}
-<input type='text' name='name' placeholder='New department name' required />
-<button type='submit'>Add Department</button></form></section>
+<input type='text' name='name' placeholder='Department name' required />
+<input type='text' name='manager_name' placeholder='Department manager name' />
+<button type='submit'>Add Department</button></form>
+<p class='subtle'>Current departments:</p><ul class='dept-list'>{''.join(dept_rows) or '<li>None yet.</li>'}</ul></section>
 <section class='card'><h2>Add Employee</h2>
 <form method='post' action='/users' class='inline-form'>
 {return_hidden}
@@ -249,6 +279,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 <h2>{title}</h2>
 <a href='{nav_next}'>Next →</a></div>
 <p class='subtle'>Current filter: <strong>{html.escape(selected_label)}</strong></p>
+<p class='subtle'>{'Red rows in pay-period view are missing at least one Monday–Friday attendance mark.' if mode == 'period' else ''}</p>
 <div class='table-wrap'><table><thead><tr><th>User / Dept</th>{head_cells}<th>Actions</th></tr></thead>
 <tbody>{rows_html}</tbody></table></div></section></main></body></html>"""
     return page.encode("utf-8")
@@ -296,9 +327,13 @@ def application(environ, start_response):
     if method == "POST" and path == "/departments":
         form = read_post(environ)
         name = (form.get("name") or [""])[0].strip()
+        manager_name = (form.get("manager_name") or [""])[0].strip()
         if name:
             with closing(get_conn()) as conn:
-                conn.execute("INSERT OR IGNORE INTO departments(name) VALUES (?)", (name,))
+                conn.execute(
+                    "INSERT OR IGNORE INTO departments(name, manager_name) VALUES (?, ?)",
+                    (name, manager_name),
+                )
                 conn.commit()
         return redirect_from_form(start_response, form)
 
@@ -318,6 +353,22 @@ def application(environ, start_response):
         user_id = int((form.get("user_id") or ["0"])[0])
         with closing(get_conn()) as conn:
             conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            conn.commit()
+        return redirect_from_form(start_response, form)
+
+    if method == "POST" and path == "/attendance/fill_weekdays":
+        form = read_post(environ)
+        user_id = int((form.get("user_id") or ["0"])[0])
+        start_str = (form.get("start") or [""])[0]
+        start_day = safe_date(start_str, sunday_for_day(date.today()))
+        sunday = sunday_for_day(start_day)
+        weekdays = [(sunday + timedelta(days=i)).isoformat() for i in range(1, 6)]
+        with closing(get_conn()) as conn:
+            for attended_on in weekdays:
+                conn.execute(
+                    "INSERT OR IGNORE INTO attendance(user_id, attended_on) VALUES (?, ?)",
+                    (user_id, attended_on),
+                )
             conn.commit()
         return redirect_from_form(start_response, form)
 
