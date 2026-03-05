@@ -130,10 +130,9 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
         "<tr>"
         f"<td>{html.escape(r['name'])}</td>"
         f"<td>{html.escape(r['manager_name'] or '—')}</td>"
-        "<td><details class='menu'><summary title='Actions'>⋯</summary><div class='menu-panel'>"
-        "<form method='post' action='/departments/delete'>"
+        "<td><form method='post' action='/departments/delete' class='inline-form'>"
         f"{hidden_inputs(state)}<input type='hidden' name='department_id' value='{r['id']}'/>"
-        "<button class='danger' type='submit'>Remove Department</button></form></div></details></td>"
+        "<button class='danger' type='submit'>Remove</button></form></td>"
         "</tr>"
         for r in departments
     ) or "<tr><td colspan='3'>No departments yet.</td></tr>"
