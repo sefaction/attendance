@@ -58,7 +58,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE departments ADD COLUMN manager_name TEXT NOT NULL DEFAULT ''")
 
         legacy_departments = conn.execute(
-            "SELECT DISTINCT trim(department) AS department FROM users WHERE trim(department) <> ''"
+            "SELECT DISTINCT trim(department) AS department FROM users WHERE trim(department) <> '' AND department_id IS NULL"
         ).fetchall()
         for row in legacy_departments:
             conn.execute("INSERT OR IGNORE INTO departments(name) VALUES (?)", (row["department"],))
@@ -72,6 +72,7 @@ def init_db() -> None:
             WHERE department_id IS NULL AND trim(department) <> ''
             """
         )
+        conn.execute("UPDATE users SET department = '' WHERE department_id IS NOT NULL AND trim(department) <> ''")
         conn.commit()
 
 
@@ -390,7 +391,11 @@ def application(environ, start_response):
         form = read_post(environ)
         department_id = int((form.get("department_id") or ["0"])[0])
         with closing(get_conn()) as conn:
+            dept = conn.execute("SELECT name FROM departments WHERE id = ?", (department_id,)).fetchone()
+            dept_name = dept["name"] if dept else ""
             conn.execute("UPDATE users SET department_id = NULL WHERE department_id = ?", (department_id,))
+            if dept_name:
+                conn.execute("UPDATE users SET department = '' WHERE trim(department) = ?", (dept_name,))
             conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
             conn.commit()
         return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
