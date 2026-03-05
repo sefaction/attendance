@@ -22,13 +22,20 @@ def init_db() -> None:
     parent = os.path.dirname(DB_PATH)
     if parent:
         os.makedirs(parent, exist_ok=True)
+
     with closing(get_conn()) as conn:
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS departments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
+            );
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
-                department TEXT NOT NULL DEFAULT ''
+                department TEXT NOT NULL DEFAULT '',
+                department_id INTEGER,
+                FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS attendance (
                 user_id INTEGER NOT NULL,
@@ -38,9 +45,29 @@ def init_db() -> None:
             );
             """
         )
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-        if "department" not in cols:
+
+        user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "department" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN department TEXT NOT NULL DEFAULT ''")
+        if "department_id" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN department_id INTEGER")
+
+        # Migrate any legacy text departments into departments table.
+        legacy_departments = conn.execute(
+            "SELECT DISTINCT trim(department) AS department FROM users WHERE trim(department) <> ''"
+        ).fetchall()
+        for row in legacy_departments:
+            conn.execute("INSERT OR IGNORE INTO departments(name) VALUES (?)", (row["department"],))
+
+        conn.execute(
+            """
+            UPDATE users
+            SET department_id = (
+                SELECT d.id FROM departments d WHERE d.name = trim(users.department)
+            )
+            WHERE department_id IS NULL AND trim(department) <> ''
+            """
+        )
         conn.commit()
 
 
@@ -71,9 +98,7 @@ def safe_date(value: str, fallback: date) -> date:
 
 def build_url(params: dict[str, str]) -> str:
     kept = {k: v for k, v in params.items() if v}
-    if not kept:
-        return "/"
-    return "/?" + urlencode(kept)
+    return "/" if not kept else "/?" + urlencode(kept)
 
 
 def render_index(query: dict[str, list[str]]) -> bytes:
@@ -82,7 +107,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
     if mode not in {"month", "period"}:
         mode = "month"
 
-    selected_department = (query.get("department") or [""])[0].strip()
+    selected_department_id = (query.get("department_id") or [""])[0].strip()
 
     if mode == "period":
         current_start = safe_date((query.get("start") or [""])[0], sunday_for_day(today))
@@ -91,9 +116,9 @@ def render_index(query: dict[str, list[str]]) -> bytes:
         prev_start = start_day - timedelta(days=7)
         next_start = start_day + timedelta(days=7)
         title = f"Pay Period {start_day.isoformat()} to {(start_day + timedelta(days=6)).isoformat()}"
-        nav_prev = build_url({"mode": "period", "start": prev_start.isoformat(), "department": selected_department})
-        nav_next = build_url({"mode": "period", "start": next_start.isoformat(), "department": selected_department})
-        return_query = {"mode": "period", "start": start_day.isoformat(), "department": selected_department}
+        nav_prev = build_url({"mode": "period", "start": prev_start.isoformat(), "department_id": selected_department_id})
+        nav_next = build_url({"mode": "period", "start": next_start.isoformat(), "department_id": selected_department_id})
+        return_query = {"mode": "period", "start": start_day.isoformat(), "department_id": selected_department_id}
     else:
         year, month = parse_month(query)
         days_in_month = 31
@@ -108,28 +133,33 @@ def render_index(query: dict[str, list[str]]) -> bytes:
         next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
         month_string = f"{year:04d}-{month:02d}"
         title = f"Month {month_string}"
-        nav_prev = build_url({"mode": "month", "month": f"{prev_year:04d}-{prev_month:02d}", "department": selected_department})
-        nav_next = build_url({"mode": "month", "month": f"{next_year:04d}-{next_month:02d}", "department": selected_department})
-        return_query = {"mode": "month", "month": month_string, "department": selected_department}
+        nav_prev = build_url({"mode": "month", "month": f"{prev_year:04d}-{prev_month:02d}", "department_id": selected_department_id})
+        nav_next = build_url({"mode": "month", "month": f"{next_year:04d}-{next_month:02d}", "department_id": selected_department_id})
+        return_query = {"mode": "month", "month": month_string, "department_id": selected_department_id}
 
     start_iso = days[0].isoformat()
     end_iso = days[-1].isoformat()
 
     with closing(get_conn()) as conn:
-        all_departments = [
-            r["department"]
-            for r in conn.execute(
-                "SELECT DISTINCT department FROM users WHERE trim(department) <> '' ORDER BY department COLLATE NOCASE"
-            ).fetchall()
-        ]
+        departments = conn.execute("SELECT id, name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
+
         where = ""
         params: list[str] = []
-        if selected_department:
-            where = "WHERE department = ?"
-            params.append(selected_department)
+        if selected_department_id:
+            where = "WHERE u.department_id = ?"
+            params.append(selected_department_id)
+
         users = conn.execute(
-            f"SELECT id, name, department FROM users {where} ORDER BY name COLLATE NOCASE", params
+            f"""
+            SELECT u.id, u.name, d.name AS department_name
+            FROM users u
+            LEFT JOIN departments d ON d.id = u.department_id
+            {where}
+            ORDER BY u.name COLLATE NOCASE
+            """,
+            params,
         ).fetchall()
+
         records = conn.execute(
             "SELECT user_id, attended_on FROM attendance WHERE attended_on BETWEEN ? AND ?",
             (start_iso, end_iso),
@@ -137,10 +167,21 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 
     marks = {(r["user_id"], r["attended_on"]) for r in records}
     head_cells = "".join(f"<th>{d.day}<br><small>{d.strftime('%a')}</small></th>" for d in days)
-
     return_hidden = "".join(
         f"<input type='hidden' name='{html.escape(k)}' value='{html.escape(v)}'/>" for k, v in return_query.items() if v
     )
+
+    dept_options = ["<option value=''>No department</option>"]
+    filter_options = ["<option value=''>All departments</option>"]
+    selected_label = "All departments"
+    for dept in departments:
+        did = str(dept["id"])
+        name = html.escape(dept["name"])
+        dept_options.append(f"<option value='{did}'>{name}</option>")
+        selected = " selected" if did == selected_department_id else ""
+        if selected:
+            selected_label = dept["name"]
+        filter_options.append(f"<option value='{did}'{selected}>{name}</option>")
 
     body_rows = []
     for user in users:
@@ -158,7 +199,8 @@ def render_index(query: dict[str, list[str]]) -> bytes:
                 f"<button type='submit' class='{cls}'>{marker}</button>"
                 "</form></td>"
             )
-        dept_label = html.escape(user["department"]) if user["department"] else "—"
+
+        dept_label = html.escape(user["department_name"] or "—")
         body_rows.append(
             "<tr>"
             f"<td><strong>{html.escape(user['name'])}</strong><br><small>{dept_label}</small></td>"
@@ -172,43 +214,41 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 
     rows_html = "".join(body_rows) if body_rows else "<tr><td colspan='999'>No users for this filter.</td></tr>"
 
-    mode_month_url = build_url({"mode": "month", "department": selected_department})
-    mode_period_url = build_url({"mode": "period", "department": selected_department})
-
-    dept_options = ["<option value=''>All departments</option>"]
-    for dept in all_departments:
-        selected = " selected" if dept == selected_department else ""
-        dept_options.append(f"<option value='{html.escape(dept)}'{selected}>{html.escape(dept)}</option>")
-
-    selected_dept_attr = html.escape(selected_department)
+    mode_month_url = build_url({"mode": "month", "department_id": selected_department_id})
+    mode_period_url = build_url({"mode": "period", "department_id": selected_department_id})
 
     page = f"""<!doctype html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Attendance Tracker</title><link rel='stylesheet' href='/static/styles.css'></head>
 <body><main><h1>Attendance Tracker</h1>
+<section class='card'><h2>Departments</h2>
+<form method='post' action='/departments' class='inline-form'>
+{return_hidden}
+<input type='text' name='name' placeholder='New department name' required />
+<button type='submit'>Add Department</button></form></section>
 <section class='card'><h2>Add Employee</h2>
 <form method='post' action='/users' class='inline-form'>
 {return_hidden}
 <input type='text' name='name' placeholder='Employee name' required />
-<input type='text' name='department' placeholder='Department (optional)' />
+<select name='department_id'>{''.join(dept_options)}</select>
 <button type='submit'>Add User</button></form></section>
 <section class='card controls'>
 <form method='get' class='inline-form'>
 <input type='hidden' name='mode' value='{mode}' />
 <input type='hidden' name='month' value='{return_query.get('month', '')}' />
 <input type='hidden' name='start' value='{return_query.get('start', '')}' />
-<label>Department:</label><select name='department'>{''.join(dept_options)}</select>
+<label>Department:</label><select name='department_id'>{''.join(filter_options)}</select>
 <button type='submit'>Apply Filter</button></form>
 <div class='view-links'>
-<a class='pill {'active' if mode=='month' else ''}' href='{mode_month_url}'>Month View</a>
-<a class='pill {'active' if mode=='period' else ''}' href='{mode_period_url}'>Pay Period View</a>
+<a class='pill {'active' if mode == 'month' else ''}' href='{mode_month_url}'>Month View</a>
+<a class='pill {'active' if mode == 'period' else ''}' href='{mode_period_url}'>Pay Period View</a>
 </div>
 </section>
 <section class='card'><div class='month-nav'>
 <a href='{nav_prev}'>← Previous</a>
 <h2>{title}</h2>
 <a href='{nav_next}'>Next →</a></div>
-<p class='subtle'>Current filter: <strong>{selected_dept_attr or 'All departments'}</strong></p>
+<p class='subtle'>Current filter: <strong>{html.escape(selected_label)}</strong></p>
 <div class='table-wrap'><table><thead><tr><th>User / Dept</th>{head_cells}<th>Actions</th></tr></thead>
 <tbody>{rows_html}</tbody></table></div></section></main></body></html>"""
     return page.encode("utf-8")
@@ -235,7 +275,7 @@ def redirect_from_form(start_response, form: dict[str, list[str]]):
         "mode": (form.get("mode") or [""])[0],
         "month": (form.get("month") or [""])[0],
         "start": (form.get("start") or [""])[0],
-        "department": (form.get("department") or [""])[0],
+        "department_id": (form.get("department_id") or [""])[0],
     }
     return redirect(start_response, build_url(args))
 
@@ -253,13 +293,23 @@ def application(environ, start_response):
         start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
         return [data]
 
+    if method == "POST" and path == "/departments":
+        form = read_post(environ)
+        name = (form.get("name") or [""])[0].strip()
+        if name:
+            with closing(get_conn()) as conn:
+                conn.execute("INSERT OR IGNORE INTO departments(name) VALUES (?)", (name,))
+                conn.commit()
+        return redirect_from_form(start_response, form)
+
     if method == "POST" and path == "/users":
         form = read_post(environ)
         name = (form.get("name") or [""])[0].strip()
-        department = (form.get("department") or [""])[0].strip()
+        department_id = (form.get("department_id") or [""])[0].strip()
+        dept_val = int(department_id) if department_id.isdigit() else None
         if name:
             with closing(get_conn()) as conn:
-                conn.execute("INSERT OR IGNORE INTO users(name, department) VALUES (?, ?)", (name, department))
+                conn.execute("INSERT OR IGNORE INTO users(name, department_id) VALUES (?, ?)", (name, dept_val))
                 conn.commit()
         return redirect_from_form(start_response, form)
 
