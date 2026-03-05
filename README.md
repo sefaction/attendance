@@ -12,19 +12,22 @@ Simple shared attendance board for salaried employees.
 ---
 
 ## Unraid Docker Compose Manager (recommended)
-This is the easiest setup path for Unraid.
 
-### 1) Add stack files in Unraid
-In **Docker Compose Manager**, create a new project and use these two files:
+If "Compose Up" failed before, it was likely because the stack used `build.context: .` (local files), but Unraid didn’t have the repo files in that stack folder.
 
-#### Stack file (`compose.yaml`)
+This stack fixes that by using a **GitHub build context URL** so Unraid can fetch source automatically.
+
+### 1) Create a stack in Unraid
+In **Docker Compose Manager**, create a new project and paste this stack:
+
 ```yaml
 services:
   attendance:
     build:
-      context: .
+      # Format: https://github.com/<owner>/<repo>.git#<branch-or-tag>
+      context: ${GIT_CONTEXT:-https://github.com/REPLACE_WITH_YOUR_USER/attendance.git#main}
       dockerfile: Dockerfile
-    image: attendance-tracker:latest
+    image: ${IMAGE_NAME:-attendance-tracker:latest}
     container_name: ${CONTAINER_NAME:-attendance-tracker}
     ports:
       - "${HOST_PORT:-8080}:8080"
@@ -32,55 +35,43 @@ services:
       ATTENDANCE_DB: ${ATTENDANCE_DB:-/data/attendance.db}
       PORT: 8080
     volumes:
-      - ${APPDATA_PATH:-./appdata}:/data
+      - ${APPDATA_PATH:-/mnt/user/appdata/attendance-tracker}:/data
     restart: unless-stopped
 ```
 
-#### Env file (`.env`)
+### 2) Add an env file in Unraid for the stack
+Use values like this:
+
 ```env
+GIT_CONTEXT=https://github.com/REPLACE_WITH_YOUR_USER/attendance.git#main
+IMAGE_NAME=attendance-tracker:latest
 CONTAINER_NAME=attendance-tracker
 HOST_PORT=8080
 APPDATA_PATH=/mnt/user/appdata/attendance-tracker
 ATTENDANCE_DB=/data/attendance.db
 ```
 
-### 2) Deploy
-- Click **Compose Up** in Docker Compose Manager.
+### 3) Deploy
+- Replace `GIT_CONTEXT` with your real GitHub repo URL/ref.
+- Click **Compose Up**.
 - Open `http://<unraid-ip>:8080` (or your `HOST_PORT`).
 
-### 3) Use
+### 4) Use
 - Add employees in the top form.
-- Click a cell to add/remove the `X` for that date.
+- Click a date cell to add/remove an `X`.
 - Click **Remove** to delete a user and their attendance history.
 
 ---
 
-## Repository files for Compose setup
-- `compose.yaml` → ready-to-use stack file.
-- `.env.example` → template for your Unraid `.env` file.
+## Included files
+- `compose.yaml` → Unraid-friendly stack using GitHub build context.
+- `.env.example` → template env file for Compose Manager.
 
-If you run this repo outside Unraid, copy and customize:
+For local testing outside Unraid:
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
 ```
 
-Then open: `http://localhost:8080`
-
----
-
-## Alternative: plain Docker CLI
-```bash
-docker build -t attendance-tracker .
-docker run -d \
-  --name attendance-tracker \
-  -p 8080:8080 \
-  -v /mnt/user/appdata/attendance-tracker:/data \
-  --restart unless-stopped \
-  attendance-tracker
-```
-
-## Notes
-- Clicking a marked `X` removes it.
-- Removing a user deletes their attendance history.
+Then open `http://localhost:8080`.
