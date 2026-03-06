@@ -5,16 +5,19 @@ import os
 import sqlite3
 from contextlib import closing
 from datetime import date, timedelta
+from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlencode
-from wsgiref.simple_server import make_server
+from wsgiref.simple_server import WSGIServer, make_server
 
 DB_PATH = os.environ.get("ATTENDANCE_DB", "/data/attendance.db")
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
 
@@ -74,6 +77,10 @@ def init_db() -> None:
         )
         conn.execute("UPDATE users SET department = '' WHERE department_id IS NOT NULL AND trim(department) <> ''")
         conn.commit()
+
+
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
 
 
 def redirect(start_response, location: str):
@@ -356,109 +363,113 @@ def redirect_from_form(start_response, form: dict[str, list[str]]):
 
 
 def application(environ, start_response):
-    method = environ["REQUEST_METHOD"]
-    path = environ.get("PATH_INFO", "/")
-    query = parse_qs(environ.get("QUERY_STRING", ""))
+    try:
+        method = environ["REQUEST_METHOD"]
+        path = environ.get("PATH_INFO", "/")
+        query = parse_qs(environ.get("QUERY_STRING", ""))
 
-    if method == "GET" and path.startswith("/static/"):
-        return serve_static(path, start_response)
+        if method == "GET" and path.startswith("/static/"):
+            return serve_static(path, start_response)
 
-    if method == "GET" and path == "/":
-        data = render_index(query)
-        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
-        return [data]
+        if method == "GET" and path == "/":
+            data = render_index(query)
+            start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
+            return [data]
 
-    if method == "GET" and path == "/departments":
-        data = render_departments_page(query)
-        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
-        return [data]
+        if method == "GET" and path == "/departments":
+            data = render_departments_page(query)
+            start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
+            return [data]
 
-    if method == "POST" and path == "/departments":
-        form = read_post(environ)
-        name = (form.get("name") or [""])[0].strip()
-        manager_name = (form.get("manager_name") or [""])[0].strip()
-        if name:
+        if method == "POST" and path == "/departments":
+            form = read_post(environ)
+            name = (form.get("name") or [""])[0].strip()
+            manager_name = (form.get("manager_name") or [""])[0].strip()
+            if name:
+                with closing(get_conn()) as conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO departments(name, manager_name) VALUES (?, ?)",
+                        (name, manager_name),
+                    )
+                    conn.commit()
+            return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
+
+        if method == "POST" and path == "/departments/delete":
+            form = read_post(environ)
+            department_id = int((form.get("department_id") or ["0"])[0])
             with closing(get_conn()) as conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO departments(name, manager_name) VALUES (?, ?)",
-                    (name, manager_name),
-                )
+                dept = conn.execute("SELECT name FROM departments WHERE id = ?", (department_id,)).fetchone()
+                dept_name = dept["name"] if dept else ""
+                conn.execute("UPDATE users SET department_id = NULL WHERE department_id = ?", (department_id,))
+                if dept_name:
+                    conn.execute("UPDATE users SET department = '' WHERE trim(department) = ?", (dept_name,))
+                conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
                 conn.commit()
-        return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
+            return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
 
+        if method == "POST" and path == "/users":
+            form = read_post(environ)
+            name = (form.get("name") or [""])[0].strip()
+            department_id = (form.get("department_id") or [""])[0].strip()
+            dept_val = int(department_id) if department_id.isdigit() else None
+            if name:
+                with closing(get_conn()) as conn:
+                    conn.execute("INSERT OR IGNORE INTO users(name, department_id) VALUES (?, ?)", (name, dept_val))
+                    conn.commit()
+            return redirect_from_form(start_response, form)
 
-    if method == "POST" and path == "/departments/delete":
-        form = read_post(environ)
-        department_id = int((form.get("department_id") or ["0"])[0])
-        with closing(get_conn()) as conn:
-            dept = conn.execute("SELECT name FROM departments WHERE id = ?", (department_id,)).fetchone()
-            dept_name = dept["name"] if dept else ""
-            conn.execute("UPDATE users SET department_id = NULL WHERE department_id = ?", (department_id,))
-            if dept_name:
-                conn.execute("UPDATE users SET department = '' WHERE trim(department) = ?", (dept_name,))
-            conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
-            conn.commit()
-        return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
-
-    if method == "POST" and path == "/users":
-        form = read_post(environ)
-        name = (form.get("name") or [""])[0].strip()
-        department_id = (form.get("department_id") or [""])[0].strip()
-        dept_val = int(department_id) if department_id.isdigit() else None
-        if name:
+        if method == "POST" and path == "/users/delete":
+            form = read_post(environ)
+            user_id = int((form.get("user_id") or ["0"])[0])
             with closing(get_conn()) as conn:
-                conn.execute("INSERT OR IGNORE INTO users(name, department_id) VALUES (?, ?)", (name, dept_val))
+                conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
                 conn.commit()
-        return redirect_from_form(start_response, form)
+            return redirect_from_form(start_response, form)
 
-    if method == "POST" and path == "/users/delete":
-        form = read_post(environ)
-        user_id = int((form.get("user_id") or ["0"])[0])
-        with closing(get_conn()) as conn:
-            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-            conn.commit()
-        return redirect_from_form(start_response, form)
-
-    if method == "POST" and path == "/attendance/fill_weekdays":
-        form = read_post(environ)
-        user_id = int((form.get("user_id") or ["0"])[0])
-        start_str = (form.get("start") or [""])[0]
-        start_day = safe_date(start_str, sunday_for_day(date.today()))
-        sunday = sunday_for_day(start_day)
-        weekdays = [(sunday + timedelta(days=i)).isoformat() for i in range(1, 6)]
-        with closing(get_conn()) as conn:
-            for attended_on in weekdays:
-                conn.execute(
-                    "INSERT OR IGNORE INTO attendance(user_id, attended_on) VALUES (?, ?)",
-                    (user_id, attended_on),
-                )
-            conn.commit()
-        return redirect_from_form(start_response, form)
-
-    if method == "POST" and path == "/attendance/toggle":
-        form = read_post(environ)
-        user_id = int((form.get("user_id") or ["0"])[0])
-        attended_on = (form.get("attended_on") or [""])[0]
-        if attended_on:
+        if method == "POST" and path == "/attendance/fill_weekdays":
+            form = read_post(environ)
+            user_id = int((form.get("user_id") or ["0"])[0])
+            start_str = (form.get("start") or [""])[0]
+            start_day = safe_date(start_str, sunday_for_day(date.today()))
+            sunday = sunday_for_day(start_day)
+            weekdays = [(sunday + timedelta(days=i)).isoformat() for i in range(1, 6)]
             with closing(get_conn()) as conn:
-                exists = conn.execute(
-                    "SELECT 1 FROM attendance WHERE user_id = ? AND attended_on = ?",
-                    (user_id, attended_on),
-                ).fetchone()
-                if exists:
-                    conn.execute("DELETE FROM attendance WHERE user_id = ? AND attended_on = ?", (user_id, attended_on))
-                else:
-                    conn.execute("INSERT INTO attendance(user_id, attended_on) VALUES (?, ?)", (user_id, attended_on))
+                for attended_on in weekdays:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO attendance(user_id, attended_on) VALUES (?, ?)",
+                        (user_id, attended_on),
+                    )
                 conn.commit()
-        return redirect_from_form(start_response, form)
+            return redirect_from_form(start_response, form)
 
-    start_response("404 Not Found", [("Content-Type", "text/plain")])
-    return [b"Not found"]
+        if method == "POST" and path == "/attendance/toggle":
+            form = read_post(environ)
+            user_id = int((form.get("user_id") or ["0"])[0])
+            attended_on = (form.get("attended_on") or [""])[0]
+            if attended_on:
+                with closing(get_conn()) as conn:
+                    deleted = conn.execute(
+                        "DELETE FROM attendance WHERE user_id = ? AND attended_on = ?",
+                        (user_id, attended_on),
+                    ).rowcount
+                    if deleted == 0:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO attendance(user_id, attended_on) VALUES (?, ?)",
+                            (user_id, attended_on),
+                        )
+                    conn.commit()
+            return redirect_from_form(start_response, form)
+
+        start_response("404 Not Found", [("Content-Type", "text/plain")])
+        return [b"Not found"]
+    except Exception as exc:
+        start_response("500 Internal Server Error", [("Content-Type", "text/plain; charset=utf-8")])
+        return [f"Server error: {exc}".encode("utf-8")]
 
 
 if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("PORT", "8080"))
     print(f"Attendance Tracker running on 0.0.0.0:{port}")
-    with make_server("0.0.0.0", port, application) as server:
+    with make_server("0.0.0.0", port, application, server_class=ThreadingWSGIServer) as server:
         server.serve_forever()
