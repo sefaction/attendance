@@ -145,13 +145,14 @@ td:first-child {
 th:last-child,
 td:last-child {
   right: 0;
-  z-index: 4;
+  z-index: 8;
 }
 
 .actions-cell {
   min-width: 140px;
   position: relative;
   overflow: visible;
+  z-index: 6;
 }
 
 .actions-cell form {
@@ -161,6 +162,11 @@ td:last-child {
 .menu {
   display: inline-block;
   position: relative;
+  z-index: 30;
+}
+
+.menu[open] {
+  z-index: 2000;
 }
 
 .menu summary {
@@ -189,7 +195,7 @@ td:last-child {
   padding: 0.4rem;
   box-shadow: 0 6px 14px rgba(0, 0, 0, 0.12);
   min-width: 170px;
-  z-index: 20;
+  z-index: 2500;
 }
 
 .mark {
