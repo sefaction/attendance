@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlencode
 from wsgiref.simple_server import WSGIServer, make_server
 
 DB_PATH = os.environ.get("ATTENDANCE_DB", "/data/attendance.db")
+REMOVE_PASSWORD = "Stm1521"
 
 
 def get_conn() -> sqlite3.Connection:
@@ -47,6 +48,14 @@ def init_db() -> None:
                 PRIMARY KEY (user_id, attended_on),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                happened_at TEXT NOT NULL DEFAULT (datetime('now')),
+                entity_type TEXT NOT NULL,
+                action TEXT NOT NULL,
+                entity_name TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT ''
+            );
             """
         )
 
@@ -76,6 +85,7 @@ def init_db() -> None:
             """
         )
         conn.execute("UPDATE users SET department = '' WHERE department_id IS NOT NULL AND trim(department) <> ''")
+        conn.execute("DELETE FROM audit_log WHERE happened_at < datetime('now', '-30 days')")
         conn.commit()
 
 
@@ -83,6 +93,20 @@ class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
 
 
+
+
+def write_audit(conn: sqlite3.Connection, entity_type: str, action: str, entity_name: str, details: str = "") -> None:
+    conn.execute(
+        "INSERT INTO audit_log(entity_type, action, entity_name, details) VALUES (?, ?, ?, ?)",
+        (entity_type, action, entity_name, details),
+    )
+    conn.execute("DELETE FROM audit_log WHERE happened_at < datetime('now', '-30 days')")
+
+
+def bad_request(start_response, message: str, redirect_to: str):
+    safe_message = html.escape(message)
+    start_response("400 Bad Request", [("Content-Type", "text/html; charset=utf-8")])
+    return [f"<html><body><p>{safe_message}</p><p><a href='{html.escape(redirect_to)}'>Go back</a></p></body></html>".encode("utf-8")]
 def redirect(start_response, location: str):
     start_response("303 See Other", [("Location", location)])
     return [b""]
@@ -133,6 +157,9 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
     back_url = build_url(state)
     with closing(get_conn()) as conn:
         departments = conn.execute("SELECT id, name, manager_name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
+        audits = conn.execute(
+            "SELECT happened_at, entity_type, action, entity_name, details FROM audit_log ORDER BY happened_at DESC LIMIT 200"
+        ).fetchall()
 
     rows = "".join(
         "<tr>"
@@ -140,10 +167,16 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
         f"<td>{html.escape(r['manager_name'] or '—')}</td>"
         "<td><form method='post' action='/departments/delete' class='inline-form'>"
         f"{hidden_inputs(state)}<input type='hidden' name='department_id' value='{r['id']}'/>"
+        "<input type='password' name='password' placeholder='Password' required />"
         "<button class='danger' type='submit'>Remove</button></form></td>"
         "</tr>"
         for r in departments
     ) or "<tr><td colspan='3'>No departments yet.</td></tr>"
+
+    audit_rows = "".join(
+        f"<tr><td>{html.escape(a['happened_at'])}</td><td>{html.escape(a['entity_type'])}</td><td>{html.escape(a['action'])}</td><td>{html.escape(a['entity_name'])}</td><td>{html.escape(a['details'])}</td></tr>"
+        for a in audits
+    ) or "<tr><td colspan='5'>No recent activity.</td></tr>"
 
     page = f"""<!doctype html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
@@ -163,6 +196,7 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
 <table><thead><tr><th>Department</th><th>Manager</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table>
 </div>
 </section>
+<section class='card'><h2>Recent Audit Log (Last 30 Days)</h2><div class='table-wrap'><table><thead><tr><th>When (UTC)</th><th>Entity</th><th>Action</th><th>Name</th><th>Details</th></tr></thead><tbody>{audit_rows}</tbody></table></div></section>
 </main></body></html>"""
     return page.encode("utf-8")
 
@@ -208,6 +242,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 
     with closing(get_conn()) as conn:
         departments = conn.execute("SELECT id, name, manager_name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
+        audits = conn.execute("SELECT happened_at, entity_type, action, entity_name, details FROM audit_log ORDER BY happened_at DESC LIMIT 200").fetchall()
 
         where = ""
         params: list[str] = []
@@ -292,7 +327,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
             + "<details class='menu'><summary title='Actions'>⋯</summary>"
             + "<div class='menu-panel'><form method='post' action='/users/delete'>"
             + f"{return_hidden}<input type='hidden' name='user_id' value='{user['id']}'/>"
-            + "<button class='danger' type='submit'>Remove</button></form></div></details></td></tr>"
+            + "<input type='password' name='password' placeholder='Password' required /><button class='danger' type='submit'>Remove</button></form></div></details></td></tr>"
         )
 
     rows_html = "".join(body_rows) if body_rows else "<tr><td colspan='999'>No users for this filter.</td></tr>"
@@ -387,23 +422,30 @@ def application(environ, start_response):
             manager_name = (form.get("manager_name") or [""])[0].strip()
             if name:
                 with closing(get_conn()) as conn:
-                    conn.execute(
+                    inserted = conn.execute(
                         "INSERT OR IGNORE INTO departments(name, manager_name) VALUES (?, ?)",
                         (name, manager_name),
-                    )
+                    ).rowcount
+                    if inserted:
+                        write_audit(conn, "department", "add", name, f"manager={manager_name or '-'}")
                     conn.commit()
             return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
 
         if method == "POST" and path == "/departments/delete":
             form = read_post(environ)
             department_id = int((form.get("department_id") or ["0"])[0])
+            password = (form.get("password") or [""])[0]
+            if password != REMOVE_PASSWORD:
+                return bad_request(start_response, "Invalid password for department removal.", "/departments")
             with closing(get_conn()) as conn:
                 dept = conn.execute("SELECT name FROM departments WHERE id = ?", (department_id,)).fetchone()
                 dept_name = dept["name"] if dept else ""
                 conn.execute("UPDATE users SET department_id = NULL WHERE department_id = ?", (department_id,))
                 if dept_name:
                     conn.execute("UPDATE users SET department = '' WHERE trim(department) = ?", (dept_name,))
-                conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
+                deleted = conn.execute("DELETE FROM departments WHERE id = ?", (department_id,)).rowcount
+                if deleted and dept_name:
+                    write_audit(conn, "department", "remove", dept_name, "deleted from departments page")
                 conn.commit()
             return redirect(start_response, "/departments" + ("?" + urlencode(state_from_query(form)) if any(state_from_query(form).values()) else ""))
 
@@ -414,15 +456,24 @@ def application(environ, start_response):
             dept_val = int(department_id) if department_id.isdigit() else None
             if name:
                 with closing(get_conn()) as conn:
-                    conn.execute("INSERT OR IGNORE INTO users(name, department_id) VALUES (?, ?)", (name, dept_val))
+                    inserted = conn.execute("INSERT OR IGNORE INTO users(name, department_id) VALUES (?, ?)", (name, dept_val)).rowcount
+                    if inserted:
+                        dept_name = conn.execute("SELECT name FROM departments WHERE id = ?", (dept_val,)).fetchone() if dept_val else None
+                        write_audit(conn, "employee", "add", name, f"department={dept_name['name'] if dept_name else '-'}")
                     conn.commit()
             return redirect_from_form(start_response, form)
 
         if method == "POST" and path == "/users/delete":
             form = read_post(environ)
             user_id = int((form.get("user_id") or ["0"])[0])
+            password = (form.get("password") or [""])[0]
+            if password != REMOVE_PASSWORD:
+                return bad_request(start_response, "Invalid password for employee removal.", "/")
             with closing(get_conn()) as conn:
-                conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+                row = conn.execute("SELECT name FROM users WHERE id = ?", (user_id,)).fetchone()
+                deleted = conn.execute("DELETE FROM users WHERE id = ?", (user_id,)).rowcount
+                if deleted and row:
+                    write_audit(conn, "employee", "remove", row["name"], "removed from attendance page")
                 conn.commit()
             return redirect_from_form(start_response, form)
 
