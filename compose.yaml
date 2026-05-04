@@ -1,0 +1,17 @@
+services:
+  attendance:
+    build:
+      # Unraid Compose Manager can clone/build directly from GitHub.
+      # Format: https://github.com/<owner>/<repo>.git#<branch-or-tag>
+      context: ${GIT_CONTEXT:-https://github.com/REPLACE_WITH_YOUR_USER/attendance.git#main}
+      dockerfile: Dockerfile
+    image: ${IMAGE_NAME:-attendance-tracker:latest}
+    container_name: ${CONTAINER_NAME:-attendance-tracker}
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      ATTENDANCE_DB: ${ATTENDANCE_DB:-/data/attendance.db}
+      PORT: 8080
+    volumes:
+      - ${APPDATA_PATH:-/mnt/user/appdata/attendance-tracker}:/data
+    restart: unless-stopped
