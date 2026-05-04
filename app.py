@@ -157,6 +157,8 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
     back_url = build_url(state)
     with closing(get_conn()) as conn:
         departments = conn.execute("SELECT id, name, manager_name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
+        dept_counts = {r["department_id"]: r["cnt"] for r in conn.execute("SELECT department_id, COUNT(*) AS cnt FROM users GROUP BY department_id").fetchall()}
+        total_employees = conn.execute("SELECT COUNT(*) AS cnt FROM users").fetchone()["cnt"]
         audits = conn.execute(
             "SELECT happened_at, entity_type, action, entity_name, details FROM audit_log ORDER BY happened_at DESC LIMIT 200"
         ).fetchall()
@@ -165,13 +167,14 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
         "<tr>"
         f"<td>{html.escape(r['name'])}</td>"
         f"<td>{html.escape(r['manager_name'] or '—')}</td>"
+        f"<td>{dept_counts.get(r['id'], 0)}</td>"
         "<td><form method='post' action='/departments/delete' class='inline-form'>"
         f"{hidden_inputs(state)}<input type='hidden' name='department_id' value='{r['id']}'/>"
         "<input type='password' name='password' placeholder='Password' required />"
         "<button class='danger' type='submit'>Remove</button></form></td>"
         "</tr>"
         for r in departments
-    ) or "<tr><td colspan='3'>No departments yet.</td></tr>"
+    ) or "<tr><td colspan='4'>No departments yet.</td></tr>"
 
     audit_rows = "".join(
         f"<tr><td>{html.escape(a['happened_at'])}</td><td>{html.escape(a['entity_type'])}</td><td>{html.escape(a['action'])}</td><td>{html.escape(a['entity_name'])}</td><td>{html.escape(a['details'])}</td></tr>"
@@ -192,8 +195,9 @@ def render_departments_page(query: dict[str, list[str]]) -> bytes:
 </form>
 </section>
 <section class='card'>
+<p class='subtle stat-line'>Total employees: <strong>{total_employees}</strong></p>
 <div class='table-wrap'>
-<table><thead><tr><th>Department</th><th>Manager</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table>
+<table><thead><tr><th>Department</th><th>Manager</th><th>Employees</th><th>Actions</th></tr></thead><tbody>{rows}</tbody></table>
 </div>
 </section>
 <section class='card'><h2>Recent Audit Log (Last 30 Days)</h2><div class='table-wrap'><table><thead><tr><th>When (UTC)</th><th>Entity</th><th>Action</th><th>Name</th><th>Details</th></tr></thead><tbody>{audit_rows}</tbody></table></div></section>
@@ -242,6 +246,8 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 
     with closing(get_conn()) as conn:
         departments = conn.execute("SELECT id, name, manager_name FROM departments ORDER BY name COLLATE NOCASE").fetchall()
+        dept_counts = {r["department_id"]: r["cnt"] for r in conn.execute("SELECT department_id, COUNT(*) AS cnt FROM users GROUP BY department_id").fetchall()}
+        total_employees = conn.execute("SELECT COUNT(*) AS cnt FROM users").fetchone()["cnt"]
         audits = conn.execute("SELECT happened_at, entity_type, action, entity_name, details FROM audit_log ORDER BY happened_at DESC LIMIT 200").fetchall()
 
         where = ""
@@ -260,6 +266,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
             """,
             params,
         ).fetchall()
+        total_users = conn.execute("SELECT COUNT(*) AS cnt FROM users").fetchone()["cnt"]
 
         records = conn.execute(
             "SELECT user_id, attended_on FROM attendance WHERE attended_on BETWEEN ? AND ?",
@@ -365,6 +372,7 @@ def render_index(query: dict[str, list[str]]) -> bytes:
 <h2>{title}</h2>
 <a href='{nav_next}'>Next →</a></div>
 <p class='subtle'>Current filter: <strong>{html.escape(selected_label)}</strong></p>
+<p class='subtle stat-line'>Total employees: <strong>{total_users}</strong></p>
 <p class='subtle'>{'Red rows in pay-period view are missing at least one Monday–Friday attendance mark.' if mode == 'period' else ''}</p>
 <div class='table-wrap'><table><thead><tr><th>User / Dept</th>{head_cells}<th>Actions</th></tr></thead>
 <tbody>{rows_html}</tbody></table></div></section></main></body></html>"""

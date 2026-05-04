@@ -215,3 +215,9 @@ td:last-child {
   background: #2e7d32;
   color: white;
 }
+
+
+.stat-line {
+  margin: 0.2rem 0 0.55rem;
+  color: #505a6b;
+}
